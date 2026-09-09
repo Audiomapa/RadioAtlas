@@ -4,8 +4,8 @@ Instalación artística de transmisión de poesía por canal acústico.
 
 El texto de un poema viaja como tonos de audio FSK entre dos Raspberry Pi
 separadas físicamente en la sala. En la Pi receptora el texto se transforma
-en imagen tipográfica usando el **Método Berenguer** —inspirado en la poeta
-chilena Carmen Berenguer— y se imprime en tiempo real en una impresora
+en imagen tipográfica usando el **Método Berenguer** —inspirado en el libro Composición de Lugar de la poeta
+uruguaya Carmen Berenguer— y se imprime en tiempo real en una impresora
 térmica de rollo continuo. El papel cae al suelo a medida que se imprime.
 
 ---
