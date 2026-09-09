@@ -1,0 +1,510 @@
+#!/usr/bin/env python3
+"""
+=====================================================================
+RECEPTOR SSTV — DECODIFICADOR + IMPRESIÓN (Raspberry Pi)
+=====================================================================
+Escucha el micrófono continuamente, detecta una transmisión SSTV en
+formato Martin M1, la decodifica a imagen y la envía a imprimir en una
+impresora térmica (rollo continuo, ESC/POS) vía USB.
+
+IMPORTANTE — recomendación práctica:
+La detección de tono y el decodificado son sensibles a ruido ambiente.
+Si es posible, conecta la salida de audio del transmisor a la entrada
+de audio (línea/mic) del receptor con un CABLE en vez de usar
+parlante+micrófono al aire. Esto elimina casi todos los problemas de
+ruido/eco de la sala y hace el decodificado mucho más confiable.
+
+Requisitos: pip install -r requirements_receptor.txt
+Además necesitas permisos para acceder al dispositivo USB de la
+impresora (en Linux, agrega tu usuario al grupo correspondiente o
+crea una regla udev — ver README).
+=====================================================================
+"""
+
+import os
+import json
+import time
+from datetime import datetime
+
+import numpy as np
+from scipy.signal import hilbert
+import sounddevice as sd
+from PIL import Image
+
+# =====================================================================
+# CONFIGURACIÓN
+# =====================================================================
+FS = 44100                     # frecuencia de muestreo (debe coincidir con el transmisor)
+ANCHO_IMG = 320
+ALTO_IMG = 256
+
+# --- Timing Martin M1 (estándar) ---
+SYNC_PULSO_SEG = 0.004862
+SYNC_PORCHE_SEG = 0.000572
+DURACION_CANAL_SEG = 0.146432
+SEPARADOR_SEG = 0.000572
+ORDEN_CANALES = ("G", "B", "R")  # Martin M1 transmite en orden Verde, Azul, Rojo
+
+DURACION_LINEA_SEG = SYNC_PULSO_SEG + SYNC_PORCHE_SEG + 3 * (DURACION_CANAL_SEG + SEPARADOR_SEG)
+DURACION_IMAGEN_SEG = DURACION_LINEA_SEG * ALTO_IMG  # ≈ 114 s
+
+FREQ_SYNC = 1200
+FREQ_NEGRO = 1500
+FREQ_BLANCO = 2300
+
+UMBRAL_DISPARO = 0.0006  # sensibilidad de detección del pulso de sync.
+                          # Calibrar SIEMPRE contra condiciones reales: deja correr
+                          # /tmp/diagnostico_completo.py (o el modo verbose de este
+                          # script) durante una transmisión completa con el volumen
+                          # real de exhibición, y usa ~60-70% del "máx.visto" que
+                          # reporte. Con un mic condensador + phantom power a nivel
+                          # de sala razonable, valores típicos rondan 0.0005-0.0015
+                          # — nada que ver con el máximo teórico (~0.25) de un tono
+                          # puro a escala completa; en la práctica real, con micrófono
+                          # a distancia, el nivel es mucho menor.
+
+UMBRAL_PUREZA = 0.15  # qué tan "puro" (concentrado en 1200Hz, no repartido en todo
+                       # el espectro) tiene que ser el sonido para contar como sync
+                       # real y no como ruido/voz ambiente. Un tono puro perfecto da
+                       # ~0.5 con la fórmula usada acá; 0.15 deja margen para eco/
+                       # distorsión de sala sin dejar pasar voces. Si sigue habiendo
+                       # falsos positivos con voz, sube este valor (ej. 0.25); si deja
+                       # de disparar con la señal real, bájalo.
+MARGEN_BUSQUEDA_SEG = 0.010  # cuánto se busca alrededor de cada línea para corregir "deriva"
+
+OUTPUT_DIR = "sstv_recibido"
+LOG_PATH = os.path.join(OUTPUT_DIR, "log_recepcion.json")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# --- Impresora térmica ESC/POS ---
+# TIPO_IMPRESORA: "usb" | "bluetooth_serial" | "network"
+#   - "usb": impresora conectada por cable USB (vendor/product ID vía `lsusb`)
+#   - "bluetooth_serial": impresora Bluetooth que se comporta como puerto serie
+#     (SPP) — la gran mayoría de las térmicas de recibo Bluetooth baratas son así.
+#     Requiere emparejar y "bindear" antes (ver README).
+#   - "network": impresora con Wifi/Ethernet, se le habla por IP.
+TIPO_IMPRESORA = "bluetooth_serial"
+
+# --- usados si TIPO_IMPRESORA == "usb" ---
+IMPRESORA_VENDOR_ID = 0x0000   # <-- reemplazar con el vendor_id real (lsusb)
+IMPRESORA_PRODUCT_ID = 0x0000  # <-- reemplazar con el product_id real (lsusb)
+# Algunas impresoras usan endpoints distintos a los que python-escpos asume
+# por defecto (0x82 IN / 0x01 OUT), lo que da "Invalid endpoint address".
+# Si te pasa eso, revisa los reales con:
+#   lsusb -v -d VENDOR:PRODUCT | grep -A5 Endpoint
+# y ponlos aquí. Deja en None para usar el comportamiento por defecto de la librería.
+IMPRESORA_IN_EP = None
+IMPRESORA_OUT_EP = None
+
+# --- usados si TIPO_IMPRESORA == "bluetooth_serial" ---
+IMPRESORA_MAC = "XX:XX:XX:XX:XX:XX"       # dirección MAC de la impresora (bluetoothctl)
+IMPRESORA_RFCOMM_DEVICE = "/dev/rfcomm0"  # dispositivo serie creado al hacer el bind
+IMPRESORA_BAUDRATE = 9600                 # muchas usan 9600; algunas 19200/115200 — ver manual
+
+# --- usado si TIPO_IMPRESORA == "network" ---
+IMPRESORA_IP = "192.168.1.100"
+
+# Ancho de impresión en puntos (dots), según el papel de tu impresora térmica:
+#   58mm de ancho ≈ 384 dots a 203dpi (el estándar de estas impresoras)
+#   80mm de ancho ≈ 576 dots a 203dpi
+# Revisa el manual de tu impresora si no estás seguro.
+IMPRESORA_ANCHO_DOTS = 384
+
+# Si es False, NO corta el papel entre una impresión y la siguiente — las
+# imágenes quedan una tira continua sin cortes ni espacios en blanco entre
+# medio, formando el recorrido completo del río en un solo rollo.
+CORTAR_ENTRE_SEGMENTOS = False
+
+# Si es True, imprime "Segmento X — fecha/hora" antes de cada imagen. Déjalo
+# en False para que la tira sea solo las imágenes, sin texto interrumpiendo.
+IMPRIMIR_ETIQUETA_TEXTO = False
+
+IMPRIMIR_AUTOMATICAMENTE = True
+
+# --- Telemetría ---
+DISPOSITIVO_ENTRADA = 1        # índice del micrófono a usar (None = default del sistema)
+MOSTRAR_NIVEL_AUDIO = True      # imprime el nivel de audio en vivo mientras escucha
+INTERVALO_TELEMETRIA_SEG = 1.0  # cada cuánto imprimir el nivel de audio / progreso de captura
+
+# Algunas interfaces de audio (ej. grabadoras profesionales tipo Zoom F3) no
+# aceptan mono — solo graban en estéreo fijo. Si tu dispositivo de entrada da
+# error de "formato/canales no disponible", cambia esto a 2; el script mezcla
+# los canales a mono automáticamente antes de procesar, así el resto del
+# decodificador no necesita cambios.
+CANALES_ENTRADA = 2
+
+
+def _marca_tiempo():
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def log_etapa(etapa, mensaje):
+    print(f"[{_marca_tiempo()}] [{etapa}] {mensaje}")
+
+
+# =====================================================================
+# 1. DETECCIÓN DE TONO (Goertzel)
+# =====================================================================
+def energia_goertzel(muestras, freq, fs):
+    """Potencia de la señal en `freq` sobre el bloque `muestras` (algoritmo de Goertzel)."""
+    n = len(muestras)
+    if n == 0:
+        return 0.0
+    k = int(0.5 + n * freq / fs)
+    w = 2 * np.pi * k / n
+    coef = 2 * np.cos(w)
+    s0, s1, s2 = 0.0, 0.0, 0.0
+    for muestra in muestras:
+        s0 = muestra + coef * s1 - s2
+        s2 = s1
+        s1 = s0
+    potencia = s1 ** 2 + s2 ** 2 - coef * s1 * s2
+    return potencia / (n ** 2)
+
+
+def pureza_tonal(muestras, energia_1200hz):
+    """
+    Qué fracción de la energía TOTAL del bloque está concentrada en 1200Hz.
+    Un pulso de sync real es un tono puro (fracción alta); una voz u otro
+    ruido reparte su energía en todo el espectro (fracción baja), aunque
+    tenga volumen similar. Esto permite distinguirlos sin depender solo
+    del volumen absoluto.
+    """
+    energia_total = float(np.mean(np.asarray(muestras, dtype=np.float64) ** 2))
+    if energia_total <= 1e-12:
+        return 0.0
+    return energia_1200hz / energia_total
+
+
+def _normalizar(audio):
+    audio = audio.astype(np.float64)
+    maximo = np.max(np.abs(audio)) or 1.0
+    return audio / maximo
+
+
+def diagnostico_entrada_audio():
+    """Muestra los dispositivos de entrada disponibles y cuál se va a usar."""
+    log_etapa("INICIO", "Dispositivos de entrada de audio disponibles:")
+    try:
+        for i, dev in enumerate(sd.query_devices()):
+            if dev["max_input_channels"] > 0:
+                marca = " <-- se va a usar" if (
+                    (DISPOSITIVO_ENTRADA is None and i == sd.default.device[0])
+                    or (DISPOSITIVO_ENTRADA == i)
+                ) else ""
+                print(f"    [{i}] {dev['name']} ({dev['max_input_channels']} canales){marca}")
+    except Exception as e:
+        log_etapa("INICIO", f"⚠️  No se pudo listar dispositivos de audio: {e}")
+
+
+def conectar_impresora():
+    """Abre la conexión a la impresora según TIPO_IMPRESORA. Lanza excepción si falla."""
+    from escpos.printer import Usb, Serial, Network
+
+    if TIPO_IMPRESORA == "usb":
+        if IMPRESORA_VENDOR_ID == 0x0000 or IMPRESORA_PRODUCT_ID == 0x0000:
+            raise RuntimeError("IMPRESORA_VENDOR_ID/PRODUCT_ID no configurados (siguen en 0x0000).")
+        kwargs = {}
+        if IMPRESORA_IN_EP is not None:
+            kwargs["in_ep"] = IMPRESORA_IN_EP
+        if IMPRESORA_OUT_EP is not None:
+            kwargs["out_ep"] = IMPRESORA_OUT_EP
+        return Usb(IMPRESORA_VENDOR_ID, IMPRESORA_PRODUCT_ID, **kwargs)
+
+    elif TIPO_IMPRESORA == "bluetooth_serial":
+        if IMPRESORA_MAC == "XX:XX:XX:XX:XX:XX":
+            raise RuntimeError("IMPRESORA_MAC no configurada. Edítala con la MAC real de la impresora.")
+        if not os.path.exists(IMPRESORA_RFCOMM_DEVICE):
+            raise RuntimeError(
+                f"{IMPRESORA_RFCOMM_DEVICE} no existe todavía. Antes de correr el script, "
+                f"vincula el Bluetooth con: sudo rfcomm bind 0 {IMPRESORA_MAC} 1  "
+                f"(ver README para el emparejamiento completo)."
+            )
+        return Serial(devfile=IMPRESORA_RFCOMM_DEVICE, baudrate=IMPRESORA_BAUDRATE, timeout=5)
+
+    elif TIPO_IMPRESORA == "network":
+        return Network(IMPRESORA_IP)
+
+    else:
+        raise RuntimeError(f"TIPO_IMPRESORA desconocido: '{TIPO_IMPRESORA}' "
+                            f"(debe ser 'usb', 'bluetooth_serial' o 'network').")
+
+
+def diagnostico_impresora():
+    """Intenta conectar a la impresora al arrancar, para no descubrir el problema recién al imprimir."""
+    if not IMPRIMIR_AUTOMATICAMENTE:
+        log_etapa("INICIO", "Impresión automática DESACTIVADA (IMPRIMIR_AUTOMATICAMENTE=False).")
+        return
+    log_etapa("INICIO", f"Probando conexión a impresora (tipo={TIPO_IMPRESORA})...")
+    try:
+        impresora = conectar_impresora()
+        impresora.close()
+        log_etapa("INICIO", f"✅ Impresora conectada correctamente (tipo={TIPO_IMPRESORA}).")
+    except Exception as e:
+        log_etapa("INICIO", f"❌ No se pudo conectar a la impresora: {e}")
+
+
+# =====================================================================
+# 2. ESCUCHA CONTINUA Y CAPTURA POR DISPARO (VOX)
+# =====================================================================
+def esperar_y_capturar_transmision():
+    """
+    Monitorea el micrófono en bloques pequeños buscando el pulso de sync
+    (1200 Hz). Cuando lo detecta, graba la duración completa de una
+    imagen (con margen) y la devuelve como array numpy.
+    """
+    log_etapa("ESCUCHA", "Esperando pulso de sync SSTV (1200 Hz)...")
+    bloque = int(FS * 0.010)  # bloques de 10 ms
+    bloques_por_telemetria = max(1, int(INTERVALO_TELEMETRIA_SEG / 0.010))
+
+    with sd.InputStream(samplerate=FS, channels=CANALES_ENTRADA, dtype="float32",
+                         device=DISPOSITIVO_ENTRADA) as stream:
+        # Fase 1: esperar disparo, mostrando nivel de audio en vivo
+        contador_bloques = 0
+        energia_maxima_vista = 0.0
+
+        while True:
+            datos, _ = stream.read(bloque)
+            muestras = datos.mean(axis=1) if CANALES_ENTRADA > 1 else datos[:, 0]
+            e = energia_goertzel(muestras, FREQ_SYNC, FS)
+            p = pureza_tonal(muestras, e)
+            energia_maxima_vista = max(energia_maxima_vista, e)
+            contador_bloques += 1
+
+            es_candidato = e > UMBRAL_DISPARO and p > UMBRAL_PUREZA
+
+            if MOSTRAR_NIVEL_AUDIO and contador_bloques % bloques_por_telemetria == 0:
+                barra_len = min(40, int(e / max(UMBRAL_DISPARO, 0.001) * 20))
+                barra = "█" * barra_len
+                log_etapa("ESCUCHA", f"nivel(1200Hz)={e:.3f}  umbral={UMBRAL_DISPARO:.3f}  "
+                                      f"pureza={p:.2f}(min {UMBRAL_PUREZA:.2f})  "
+                                      f"máx.visto={energia_maxima_vista:.3f}  {barra}")
+
+            if es_candidato:
+                log_etapa("DISPARO", f"¡Pulso de sync detectado! (energía={e:.3f}, pureza={p:.2f}). "
+                                      f"Iniciando grabación de {DURACION_IMAGEN_SEG:.0f}s...")
+                break
+
+        # Fase 2: grabar la duración completa de la imagen + margen
+        # +4s de margen en vez de +2s: la ventana de confirmación anti-voz (2 de
+        # los últimos 5 bloques) hace que el disparo real ocurra un poco después
+        # del pulso de sync verdadero — este margen extra compensa eso para no
+        # quedarnos cortos justo al final de la última línea.
+        duracion_captura = DURACION_IMAGEN_SEG + 4.0
+        n_muestras = int(FS * duracion_captura)
+        capturado = []
+        leidas = 0
+        t_inicio_captura = time.time()
+        siguiente_reporte = t_inicio_captura + INTERVALO_TELEMETRIA_SEG * 5  # cada ~5s
+
+        while leidas < n_muestras:
+            faltan = min(bloque, n_muestras - leidas)
+            datos, _ = stream.read(faltan)
+            muestras = datos.mean(axis=1) if CANALES_ENTRADA > 1 else datos[:, 0]
+            capturado.append(muestras.copy())
+            leidas += faltan
+
+            if time.time() >= siguiente_reporte:
+                transcurrido = time.time() - t_inicio_captura
+                log_etapa("CAPTURA", f"grabando... {transcurrido:.0f}s / {duracion_captura:.0f}s")
+                siguiente_reporte += INTERVALO_TELEMETRIA_SEG * 5
+
+    log_etapa("CAPTURA", "Grabación completa.")
+    return np.concatenate(capturado)
+
+
+# =====================================================================
+# 3. DECODIFICACIÓN MARTIN M1
+# =====================================================================
+def _mejor_offset_sync(audio, centro_muestra, margen_muestras):
+    """
+    Busca, alrededor de centro_muestra, el mejor punto de inicio del pulso de
+    sync. Vectorizado con numpy (suma de correlación I/Q vía suma acumulada)
+    en vez de llamar energia_goertzel en un bucle Python por cada posición
+    candidata — eso era el cuello de botella que hacía tardar ~100s por imagen.
+    """
+    inicio = max(0, centro_muestra - margen_muestras)
+    fin = min(len(audio), centro_muestra + margen_muestras)
+    ventana_sync = int(FS * SYNC_PULSO_SEG)
+    paso = max(1, ventana_sync // 8)
+
+    segmento = audio[inicio:fin]
+    if len(segmento) < ventana_sync:
+        return centro_muestra
+
+    n = len(segmento)
+    idx = np.arange(n)
+    fase = 2 * np.pi * FREQ_SYNC * idx / FS
+    prod_c = segmento * np.cos(fase)
+    prod_s = segmento * np.sin(fase)
+
+    cs_c = np.concatenate(([0.0], np.cumsum(prod_c)))
+    cs_s = np.concatenate(([0.0], np.cumsum(prod_s)))
+
+    posiciones = np.arange(0, n - ventana_sync, paso)
+    if len(posiciones) == 0:
+        return centro_muestra
+    suma_c = cs_c[posiciones + ventana_sync] - cs_c[posiciones]
+    suma_s = cs_s[posiciones + ventana_sync] - cs_s[posiciones]
+    energia = suma_c**2 + suma_s**2
+
+    mejor_idx = int(np.argmax(energia))
+    return inicio + int(posiciones[mejor_idx])
+
+
+def _frecuencia_instantanea(segmento, fs):
+    analitica = hilbert(segmento)
+    fase = np.unwrap(np.angle(analitica))
+    freq_inst = np.diff(fase) / (2.0 * np.pi) * fs
+    return np.concatenate([freq_inst, [freq_inst[-1]]])  # mismo largo que el segmento
+
+
+def _freq_a_pixeles(segmento_audio, fs, ancho_px):
+    freq_inst = _frecuencia_instantanea(segmento_audio, fs)
+    # Promediar la frecuencia instantánea dentro de cada intervalo de píxel
+    bordes = np.linspace(0, len(freq_inst), ancho_px + 1).astype(int)
+    pixeles = np.zeros(ancho_px, dtype=np.uint8)
+    for i in range(ancho_px):
+        tramo = freq_inst[bordes[i]:bordes[i + 1]]
+        if len(tramo) == 0:
+            valor_freq = FREQ_NEGRO
+        else:
+            valor_freq = np.median(tramo)
+        valor = (valor_freq - FREQ_NEGRO) / (FREQ_BLANCO - FREQ_NEGRO) * 255
+        pixeles[i] = np.clip(valor, 0, 255)
+    return pixeles
+
+
+def decodificar_martin_m1(audio):
+    """Decodifica un buffer de audio (una imagen completa) a un objeto PIL.Image RGB."""
+    audio = _normalizar(audio)
+
+    canal_g = np.zeros((ALTO_IMG, ANCHO_IMG), dtype=np.uint8)
+    canal_b = np.zeros((ALTO_IMG, ANCHO_IMG), dtype=np.uint8)
+    canal_r = np.zeros((ALTO_IMG, ANCHO_IMG), dtype=np.uint8)
+
+    margen_muestras = int(FS * MARGEN_BUSQUEDA_SEG)
+    puntero_esperado = 0
+
+    for linea in range(ALTO_IMG):
+        inicio_sync = _mejor_offset_sync(audio, puntero_esperado, margen_muestras)
+        cursor = inicio_sync + int(FS * (SYNC_PULSO_SEG + SYNC_PORCHE_SEG))
+
+        for nombre_canal in ORDEN_CANALES:
+            n_muestras_canal = int(FS * DURACION_CANAL_SEG)
+            segmento = audio[cursor:cursor + n_muestras_canal]
+            if len(segmento) < n_muestras_canal:
+                segmento = np.pad(segmento, (0, n_muestras_canal - len(segmento)))
+
+            pixeles = _freq_a_pixeles(segmento, FS, ANCHO_IMG)
+            if nombre_canal == "G":
+                canal_g[linea] = pixeles
+            elif nombre_canal == "B":
+                canal_b[linea] = pixeles
+            else:
+                canal_r[linea] = pixeles
+
+            cursor += n_muestras_canal + int(FS * SEPARADOR_SEG)
+
+        puntero_esperado = inicio_sync + int(FS * DURACION_LINEA_SEG)
+
+    rgb = np.dstack([canal_r, canal_g, canal_b])
+    return Image.fromarray(rgb, mode="RGB")
+
+
+# =====================================================================
+# 4. IMPRESIÓN EN IMPRESORA TÉRMICA (ESC/POS)
+# =====================================================================
+def imprimir_imagen(imagen, numero_segmento, total_segmentos=None):
+    if not IMPRIMIR_AUTOMATICAMENTE:
+        log_etapa("IMPRESIÓN", "Omitida (IMPRIMIR_AUTOMATICAMENTE=False).")
+        return
+    t0 = time.time()
+    try:
+        log_etapa("IMPRESIÓN", f"Conectando a impresora (tipo={TIPO_IMPRESORA})...")
+        impresora = conectar_impresora()
+
+        # Redimensionar al ancho COMPLETO del papel (preservando proporción),
+        # en vez de dejar que la librería centre la imagen pequeña con
+        # márgenes en blanco alrededor.
+        ancho_orig, alto_orig = imagen.size
+        nuevo_alto = max(1, round(alto_orig * (IMPRESORA_ANCHO_DOTS / ancho_orig)))
+        imagen_ajustada = imagen.resize((IMPRESORA_ANCHO_DOTS, nuevo_alto), Image.LANCZOS)
+
+        if IMPRIMIR_ETIQUETA_TEXTO:
+            etiqueta = f"Segmento {numero_segmento}"
+            if total_segmentos:
+                etiqueta += f"/{total_segmentos}"
+            etiqueta += f" — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            impresora.set(align="center")
+            impresora.text(etiqueta + "\n")
+
+        impresora.image(imagen_ajustada, center=False)
+
+        if CORTAR_ENTRE_SEGMENTOS:
+            impresora.cut()
+
+        impresora.close()
+        log_etapa("IMPRESIÓN", f"✅ Segmento {numero_segmento} impreso "
+                                f"({IMPRESORA_ANCHO_DOTS}x{nuevo_alto} dots, {time.time() - t0:.1f}s).")
+    except Exception as e:
+        log_etapa("IMPRESIÓN", f"❌ Error al imprimir: {e}")
+
+
+# =====================================================================
+# 5. LOG DE RECEPCIÓN
+# =====================================================================
+def cargar_log():
+    if os.path.exists(LOG_PATH):
+        with open(LOG_PATH) as f:
+            return json.load(f)
+    return {"recibidos": 0, "historial": []}
+
+
+def guardar_log(log):
+    with open(LOG_PATH, "w") as f:
+        json.dump(log, f, indent=2)
+
+
+# =====================================================================
+# BUCLE PRINCIPAL
+# =====================================================================
+if __name__ == "__main__":
+    print("=== RECEPTOR SSTV — DECODIFICADOR DEL RECORRIDO DEL RÍO ===")
+    diagnostico_entrada_audio()
+    diagnostico_impresora()
+    log = cargar_log()
+    log_etapa("INICIO", f"Segmentos recibidos hasta ahora: {log['recibidos']}.")
+
+    try:
+        while True:
+            audio = esperar_y_capturar_transmision()
+
+            t0 = time.time()
+            log_etapa("DECODIFICACIÓN", "Decodificando imagen (esto toma unos segundos)...")
+            try:
+                imagen = decodificar_martin_m1(audio)
+                log_etapa("DECODIFICACIÓN", f"Listo ({time.time() - t0:.1f}s).")
+            except Exception as e:
+                log_etapa("DECODIFICACIÓN", f"❌ Error al decodificar: {e}. Descartando esta captura.")
+                continue
+
+            log["recibidos"] += 1
+            nombre_archivo = os.path.join(
+                OUTPUT_DIR, f"segmento_{log['recibidos']:04d}.png"
+            )
+            imagen.save(nombre_archivo)
+            tamano_kb = os.path.getsize(nombre_archivo) / 1024
+            log["historial"].append({
+                "numero": log["recibidos"],
+                "archivo": nombre_archivo,
+                "hora": datetime.now().isoformat(),
+            })
+            guardar_log(log)
+            log_etapa("GUARDADO", f"Imagen #{log['recibidos']} guardada: {nombre_archivo} ({tamano_kb:.0f} KB)")
+
+            imprimir_imagen(imagen, log["recibidos"])
+            log_etapa("CICLO", f"Segmento {log['recibidos']} completo. Volviendo a escuchar.\n")
+
+    except KeyboardInterrupt:
+        print("\nReceptor detenido manualmente.")

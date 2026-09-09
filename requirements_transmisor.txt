@@ -1,0 +1,6 @@
+matplotlib
+contextily
+Pillow
+pysstv
+scipy
+requests
