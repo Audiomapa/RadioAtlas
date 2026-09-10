@@ -1,6 +1,6 @@
 # RadioAtlas — Poema Visual Berenguer
 
-Instalación artística de transmisión de poesía por canal acústico.
+Instalación artística de transmisión de poesía visual por canal acústico.
 
 El texto de un poema viaja como tonos de audio FSK entre dos Raspberry Pi
 separadas físicamente en la sala. En la Pi receptora el texto se transforma
