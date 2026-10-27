@@ -10,7 +10,7 @@ Dispositivo de creación de un poema visual impreso utilizando transmisión de t
 |---------|-----------|--------|----------|--------|
 | `v1-sstv` | SSTV — imágenes por audio | — | — | Abandonado: canal acústico degrada imagen hasta ilegibilidad |
 | `v2-fsk` | FSK 50 baud — texto por audio | Impresora térmica de rollo continuo | **RadioAtlas: la cosmonauta Berenguer · Festival de la Imagen · Manizales · 2026** | Exhibido |
-| `v2-fsk + display` | FSK 50 baud — texto por audio | Pantallas pygame (emisor + receptor) | **RadioAtlas: cartografía y supervivencia · CAC Cerrillos** | En desarrollo |
+| `v2-fsk + display` | FSK 50 baud — texto por audio | Impresora térmica + pantallas pygame (emisor + receptor) | **RadioAtlas: cartografía y supervivencia · CAC Cerrillos** | En desarrollo |
 
 ---
 
@@ -38,7 +38,7 @@ display_emisor.py                          → metodo_berenguer_v2.py
 **RadioAtlas: cartografía y supervivencia**  
 Centro de Arte Contemporáneo Cerrillos · 2026
 
-El texto del poema sigue viajando por audio FSK entre las dos Pis. El cambio respecto al Festival de la Imagen es la salida: en vez de imprimirse en papel térmico, el Método Berenguer se muestra en pantallas conectadas a cada Pi.
+El texto del poema sigue viajando por audio FSK entre las dos Pis. Se mantiene la impresión en papel térmico y se suma una pantalla conectada a cada Pi: el emisor muestra telemetría en tiempo real y el receptor visualiza el Método Berenguer.
 
 ### Emisor (Pi-A · radioatlasemisor)
 
@@ -60,7 +60,8 @@ El texto del poema sigue viajando por audio FSK entre las dos Pis. El cambio res
 
 - `receptor_fsk_v2.py` — demodulador FSK
 - `metodo_berenguer_v2.py` — 10 transformaciones tipográficas
-- `display_receptor.py` — **en desarrollo**
+- Impresora térmica de rollo continuo (papel cae al suelo)
+- `display_receptor.py` — visualización en pantalla *(en desarrollo)*
 
 ---
 
