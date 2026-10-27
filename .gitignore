@@ -1,18 +1,15 @@
-# Audio generado por el transmisor
-fsk_output_berenguer/
-*.wav
-
-# Imágenes generadas e impresas
-sstv_recibido/
-*.png
-
-# Estado de runtime — cambia constantemente, distinto en cada Pi
-estado_fsk.json
-estado_poema.json
-estado_berenguer.json
-
-# Entorno virtual Python
-entorno_arte/
 __pycache__/
 *.pyc
+*.wav
+*.log
+*.DS_Store
+fsk_output_berenguer/
 V1_sstv/
+PANTALLAS/fotos/
+entorno_arte/
+venv/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif

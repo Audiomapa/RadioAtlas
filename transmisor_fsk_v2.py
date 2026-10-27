@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 =====================================================================
-TRANSMISOR FSK — POEMA VISUAL BERENGUER
+TRANSMISOR FSK — POEMA VISUAL RADIOATLAS
 =====================================================================
 Envía el texto del poema como tonos de audio FSK (Frequency Shift
 Keying) en vez de imágenes SSTV. Ventajas sobre SSTV:
@@ -35,6 +35,7 @@ import subprocess
 import time
 from datetime import datetime, time as dtime
 
+import random
 import numpy as np
 from scipy.io import wavfile
 
@@ -48,14 +49,14 @@ BAUDRATE   = 50     # símbolos/segundo — 20ms por bit
 SAMPLES_POR_SIMBOLO = int(FS / BAUDRATE)  # 882 muestras por bit
 
 SYNC_WORD  = b'\xAB\xCD'   # 2 bytes de sync al inicio de cada mensaje
-SILENCIO_ENTRE_ENVIOS_SEG = 100  # pausa entre transmisiones
+SILENCIO_ENTRE_ENVIOS_SEG = 180  # pausa entre transmisiones
 
 FRASES_ARCHIVO = "frases.txt"
 ESTADO_ARCHIVO = "estado_fsk.json"
 OUTPUT_DIR     = "fsk_output_berenguer"
 
-HORA_INICIO = dtime(9, 0)
-HORA_FIN    = dtime(21, 0)
+HORA_INICIO = dtime(0, 0)
+HORA_FIN    = dtime(23, 59)
 REPRODUCTOR = None   # None = detecta paplay/aplay automáticamente
 
 
@@ -167,9 +168,9 @@ def texto_a_audio(texto: str) -> np.ndarray:
 #             Ejemplo: "un adentro sin afuera — que extraen los biomas"
 #
 # Probabilidades configurables — deben sumar 1.0:
-PROB_LITERAL = 0.60   # frases del corpus tal cual
-PROB_DERIVA  = 0.30   # generadas por Markov
-PROB_CORTE   = 0.10   # generadas por cut-up
+PROB_LITERAL = 0.40   # frases del corpus tal cual
+PROB_DERIVA  = 0.40   # generadas por Markov
+PROB_CORTE   = 0.20   # generadas por cut-up
 
 
 def construir_transiciones(frases):
@@ -301,7 +302,7 @@ if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     frases = cargar_frases()
     transiciones = construir_transiciones(frases)
-    print(f"=== TRANSMISOR FSK — POEMA VISUAL BERENGUER ===")
+    print(f"=== TRANSMISOR FSK — POEMA VISUAL RADIOATLAS ===")
     print(f"frases: {len(frases)} | {BAUDRATE} baud | "
           f"mark={FREQ_MARK}Hz  space={FREQ_SPACE}Hz  sep=1000Hz")
     print(f"generacion: {int(PROB_LITERAL*100)}% literal | "
