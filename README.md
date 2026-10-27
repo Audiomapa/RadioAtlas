@@ -1,95 +1,78 @@
-# RadioAtlas — Poema Visual Berenguer
+# RadioAtlas
 
-Instalación artística de transmisión de poesía visual por canal acústico.
+Dispositivo de creación de un poema visual impreso utilizando transmisión de tonos FSK entre dos Raspberry Pi separadas físicamente en la sala. En el receptor el texto se transforma visualmente usando el **Método Berenguer** —inspirado en el libro *Composición de Lugar* de la poeta uruguaya Carmen Berenguer.
 
-El texto de un poema viaja como tonos de audio FSK entre dos Raspberry Pi
-separadas físicamente en la sala. En la Pi receptora el texto se transforma
-en imagen tipográfica usando el **Método Berenguer** —inspirado en el libro Composición de Lugar de la poeta
-uruguaya Carmen Berenguer— y se imprime en tiempo real en una impresora
-térmica de rollo continuo. El papel cae al suelo a medida que se imprime.
+---
+
+## Versiones
+
+| Versión | Protocolo | Salida | Contexto | Estado |
+|---------|-----------|--------|----------|--------|
+| `v1-sstv` | SSTV — imágenes por audio | — | — | Abandonado: canal acústico degrada imagen hasta ilegibilidad |
+| `v2-fsk` | FSK 50 baud — texto por audio | Impresora térmica de rollo continuo | **RadioAtlas: la cosmonauta Berenguer · Festival de la Imagen · Manizales · 2026** | Exhibido |
+| `v2-fsk + display` | FSK 50 baud — texto por audio | Pantallas pygame (emisor + receptor) | **RadioAtlas: cartografía y supervivencia · CAC Cerrillos** | En desarrollo |
 
 ---
 
 ## Arquitectura
 
 ```
-PI-A · RadioAtlas (transmisor)          PI-B · radioatlasreceptor (receptor)
-──────────────────────────────          ─────────────────────────────────────
-frases.txt  (24 versos del poema)       Roland R-07  (USB audio input)
-transmisor_fsk.py                       receptor_fsk.py
-→ modulación FSK 1200/2200 Hz           → Goertzel vectorizado (numpy)
-→ 50 baud · preámbulo 2s               → detección de preámbulo por energía
-→ paplay/aplay → parlante              → 8 offsets de sincronización + CRC
-                                        → metodo_berenguer.py
-        ──── canal acústico ───►        → imagen 576×N px (alto variable)
-                                        → rotación 180° para papel caído
-                                        → impresora térmica USB · rollo 80mm
+PI-A · radioatlasemisor (transmisor)       PI-B · radioatlasreceptor (receptor)
+────────────────────────────────           ────────────────────────────────────
+frases.txt  (versos del poema)             Roland R-07  (USB audio input)
+transmisor_fsk_v2.py                       receptor_fsk_v2.py
+→ modulación FSK 1200/2200 Hz             → Goertzel vectorizado (numpy)
+→ 50 baud · preámbulo 2s                  → detección de preámbulo por energía
+→ aplay → parlante                        → 8 offsets sincronización + CRC
+display_emisor.py                          → metodo_berenguer_v2.py
+→ telemetría en verde                      display_receptor.py  ← en desarrollo
+→ ASCII art typewriter                     → visualización Método Berenguer
+
+        ──── canal acústico ───►
 ```
 
 ---
 
-## Versiones del sistema
+## Versión actual — CAC Cerrillos
 
-| Tag | Protocolo | Estado |
-|-----|-----------|--------|
-| `v1-sstv` | SSTV — imágenes por audio | Abandonado: canal acústico de sala degrada la imagen hasta ilegibilidad |
-| `v2-fsk`  | FSK — texto por audio, imagen generada en el receptor | **En uso** |
+**RadioAtlas: cartografía y supervivencia**  
+Centro de Arte Contemporáneo Cerrillos · 2026
 
-La decisión de pasar de SSTV a FSK fue central: en vez de transmitir la imagen
-(frágil ante ruido y reverberación), se transmite el texto crudo y el Método
-Berenguer se aplica localmente en el receptor. El canal acústico solo tiene que
-sobrevivir texto ASCII — mucho más robusto.
+El texto del poema sigue viajando por audio FSK entre las dos Pis. El cambio respecto al Festival de la Imagen es la salida: en vez de imprimirse en papel térmico, el Método Berenguer se muestra en pantallas conectadas a cada Pi.
 
----
+### Emisor (Pi-A · radioatlasemisor)
 
-## Archivos
+- `transmisor_fsk_v2.py` — FSK 50 baud, deriva + corte de frases, SILENCIO=180s entre envíos
+- `display_emisor.py` — pantalla pygame: telemetría verde en tiempo real + ASCII art typewriter al entrar en silencio
+- `start_display.sh` — lanzador del display (xinit, xrandr portrait, pygame)
+- Servicios systemd: `radioatlas-display.service` + `transmisor.service` (auto-start al encender)
+- Audio: `SDL_AUDIODRIVER=dummy` libera ALSA para `aplay`
 
-| Archivo | Descripción | Pi |
-|---------|-------------|-----|
-| `transmisor_fsk.py` | Modulador FSK + reproductor de audio | RadioAtlas |
-| `receptor_fsk.py` | Demodulador FSK + control de impresora | radioatlasreceptor |
-| `metodo_berenguer.py` | Generador de imagen tipográfica | ambas |
-| `frases.txt` | 24 versos del poema fuente | ambas |
+### Timers display
 
-**No versionados** (datos de runtime):
-- `estado_fsk.json` — índice de frase y número de envío (transmisor)
-- `sstv_recibido/estado_berenguer.json` — índice de transformación (receptor)
-- `fsk_output_berenguer/*.wav` — audio generado
-- `sstv_recibido/*.png` — imágenes impresas
+| Parámetro | Valor | Descripción |
+|-----------|-------|-------------|
+| `LOG_IDLE_SECS` | 20s | Silencio antes de mostrar imagen |
+| `ASCII_BUILD_SECS` | 120s | Tiempo en construir imagen (typewriter) |
+| `ASCII_HOLD_SECS` | 180s | Imagen completa visible antes de ciclar |
 
----
+### Receptor (Pi-B · radioatlasreceptor)
 
-## Arranque
-
-```bash
-# Receptor (192.168.20.36)
-source ~/entorno_arte/bin/activate
-python3 receptor_fsk.py
-
-# Transmisor (192.168.20.33)
-cd ~/rio_sstv && source entorno_arte/bin/activate
-python3 transmisor_fsk.py
-
-# Prueba sin modificar estado
-python3 transmisor_fsk.py --prueba
-
-# Texto específico
-python3 transmisor_fsk.py --texto "frase de prueba"
-```
+- `receptor_fsk_v2.py` — demodulador FSK
+- `metodo_berenguer_v2.py` — 10 transformaciones tipográficas
+- `display_receptor.py` — **en desarrollo**
 
 ---
 
 ## Método Berenguer
 
-Diez transformaciones tipográficas que se aplican secuencialmente al texto
-recibido. El índice de transformación **nunca se resetea** — la secuencia
-no se repite aunque el pool de frases dé una vuelta completa.
+Diez transformaciones tipográficas aplicadas secuencialmente al texto recibido. El índice **nunca se resetea** — la secuencia no se repite aunque el pool de frases dé una vuelta completa.
 
 | idx | transformación | descripción |
 |-----|---------------|-------------|
 | 0 | `tension` | palabras en línea, una destacada en bold |
 | 1 | `fragmentacion` | frase dividida en 2–3 fragmentos a distintos tamaños |
-| 2 | `vertical` | letras en columna vertical (puede ocupar hasta ~25cm de papel) |
+| 2 | `vertical` | letras en columna vertical |
 | 3 | `escalada` | palabras que crecen de pequeño a grande |
 | 4 | `colapso` | palabras que menguan de grande a pequeño |
 | 5 | `pliegue` | primera mitad normal, segunda girada 180° |
@@ -98,36 +81,43 @@ no se repite aunque el pool de frases dé una vuelta completa.
 | 8 | `mesostico` | mesostico tipo John Cage con palabra espina |
 | 9 | `escalera_letras` | letras individuales en escalera diagonal |
 
-El alto del segmento impreso es **variable**: cada transformación termina
-completa antes de cortar (nunca se trunca texto a mitad). El rango real con
-las frases del poema actual va de ~5cm a ~25cm por segmento.
+---
+
+## Archivos
+
+| Archivo | Descripción | Pi |
+|---------|-------------|-----|
+| `transmisor_fsk_v2.py` | Modulador FSK + reproductor | emisor |
+| `display_emisor.py` | Pantalla emisor (telemetría + ASCII art) | emisor |
+| `start_display.sh` | Lanzador pygame (xinit + xrandr) | emisor |
+| `receptor_fsk_v2.py` | Demodulador FSK | receptor |
+| `metodo_berenguer_v2.py` | Transformaciones tipográficas | receptor |
+| `display_receptor.py` | Pantalla receptor *(en desarrollo)* | receptor |
+| `frases.txt` | Versos del poema fuente | ambas |
+
+**No versionados:**
+- `estado_poema.json` / `estado_fsk.json` — estado de runtime
+- `fsk_output_berenguer/*.wav` — audio generado
+- `banco_imagenes/` — imágenes ASCII para display emisor
 
 ---
 
 ## Dependencias
 
 ```bash
-# En ambas Pis
-sudo apt install -y fonts-dejavu-core
+# emisor (radioatlasemisor)
+pip install numpy scipy
+sudo apt install python3-pygame
 
-# En radioatlasreceptor (entorno_arte)
-pip install pillow numpy sounddevice python-escpos
-```
-
-```bash
-# En RadioAtlas (rio_sstv)
-pip install numpy scipy sounddevice
+# receptor (radioatlasreceptor · entorno_arte)
+pip install pillow numpy sounddevice
 ```
 
 ---
 
-## Hardware confirmado
+## Pendientes antes de la exposición
 
-- **Audio entrada**: Roland R-07 como interfaz USB (`DISPOSITIVO_ENTRADA = 1`)
-- **Impresora**: `VID 0x0483 / PID 0x5720` (STMicroelectronics) · papel 80mm · 203dpi · 576 dots
-- **udev**: `/etc/udev/rules.d/99-escpos.rules`
-- **usblp**: en blacklist (`/etc/modprobe.d/blacklist-usblp.conf`)
-
----
-
-## Festival de la Imagen · Manizales · 2026
+- [ ] Restaurar horario: `HORA_INICIO = dtime(9, 0)` / `HORA_FIN = dtime(20, 0)` en `transmisor_fsk_v2.py`
+- [ ] Desarrollar `display_receptor.py`
+- [ ] Subir imágenes finales a `banco_imagenes/` en Pi emisor
+- [ ] Sincronizar archivos receptor desde Pi-B al repo
