@@ -1,0 +1,5 @@
+# /etc/cron.d/radioatlas-recortar-log — RadioAtlas receptor
+# /tmp/receptor.log vive en RAM y crece ~4 MB/día (telemetría cada 1 s).
+# Cada 15 min: si pasa de 1 MB, conserva las últimas 500 líneas (sin marcadores
+# BERENGUER, para que el display no repita el último bloque).
+*/15 * * * * root f=/tmp/receptor.log; [ -f "$f" ] && [ "$(stat -c \%s "$f")" -gt 1000000 ] && tail -n 500 "$f" | grep -av 'BERENGUER_' > "$f.tmp" && cat "$f.tmp" > "$f" && rm -f "$f.tmp"

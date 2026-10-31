@@ -1,0 +1,16 @@
+[Unit]
+Description=RadioAtlas Receptor FSK
+After=sound.target multi-user.target
+
+[Service]
+User=qzzk
+WorkingDirectory=/home/qzzk
+# -u: stdout sin buffer → el display_receptor.py recibe líneas en tiempo real
+ExecStart=/home/qzzk/entorno_arte/bin/python3 -u /home/qzzk/receptor_fsk_v2.py
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/tmp/receptor.log
+StandardError=append:/tmp/receptor.log
+
+[Install]
+WantedBy=multi-user.target
