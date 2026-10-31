@@ -3,10 +3,13 @@
 Todos los comandos se corren desde el Mac. Los que llevan `sudo` piden la contraseña de la Pi.
 
 ## Antes de viajar a Santiago
-- [ ] Tailscale en el receptor (el emisor ya lo tiene, 100.91.50.45). Autorizar con la misma cuenta.
+- [x] Tailscale en el receptor: instalado 31 Oct (receptor 100.72.213.62, emisor 100.91.50.45). SSH verificado a ambas desde radio100al.
 - [ ] Desactivar el vencimiento de clave de ambos equipos en la consola de Tailscale (por defecto 180 días).
 - [ ] Wifi de la galería: pedir nombre y clave y cargarla en las dos Pi antes de viajar. Red WPA2 sin portal de inicio de sesión (o router/4G propio).
-- [ ] Hora sin internet: las Pi 3 no tienen reloj con pila; sin NTP, tras un corte de luz la hora queda corrida y el horario 9–20 también.
+- [ ] **CRÍTICO — corte de luz o desenchufar una Pi (es lo mismo):**
+    - Hora: las Pi 3 no tienen reloj con pila; sin internet arrancan con la hora del apagado y el horario 9–20 del emisor queda corrido. Con NTP se corrige sola.
+    - Tarjeta SD: un corte mientras escribe puede dañar archivos o el sistema. Apagar con `sudo poweroff` antes de desenchufar; llevar copia de la tarjeta de cada Pi.
+    - Mitigación: internet estable; módulo RTC DS3231 en cada Pi; o enchufe con timer en lugar del horario por software; avisar al personal de sala.
 - [ ] Texto nuevo: mismo `frases.txt` en emisor (`~/rio_sstv/frases.txt`) y receptor (`~/frases.txt`), reiniciar ambos servicios. Cada frase ≤ 80 bytes UTF-8 (tildes y ñ = 2). La captura corta a 17 s (~90 bytes de texto). Las actuales: 20–73 bytes.
 - [ ] Prueba de reinicio completo de las dos Pi.
 - [ ] Opcional: receptor con `hw:CARD=ZEDi8,DEV=0` en vez de `hw:2,0`.
