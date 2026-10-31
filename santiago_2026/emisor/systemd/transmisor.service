@@ -1,0 +1,14 @@
+[Unit]
+Description=Transmisor FSK Poema Berenguer
+After=network.target sound.target
+Wants=network-online.target
+
+[Service]
+User=qzzk
+WorkingDirectory=/home/qzzk/rio_sstv
+ExecStart=/home/qzzk/rio_sstv/entorno_arte/bin/python3 transmisor_fsk_v2.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

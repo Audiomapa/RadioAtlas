@@ -1,0 +1,15 @@
+[Unit]
+Description=RadioAtlas Display Receptor
+After=multi-user.target
+
+[Service]
+User=root
+Environment=HOME=/home/qzzk
+ExecStart=/usr/bin/xinit /home/qzzk/start_display_receptor.sh -- :0 vt1
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/tmp/receptor_display.log
+StandardError=append:/tmp/receptor_display.log
+
+[Install]
+WantedBy=multi-user.target
